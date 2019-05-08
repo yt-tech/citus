@@ -493,6 +493,7 @@ CreateShardsOnWorkers(Oid distributedRelationId, List *shardPlacements,
 	List *foreignConstraintCommandList = GetTableForeignConstraintCommands(
 		distributedRelationId);
 	ListCell *shardPlacementCell = NULL;
+	int poolSize = DEFAULT_POOL_SIZE;
 
 	List *taskList = NIL;
 	int taskId = 1;
@@ -553,7 +554,9 @@ CreateShardsOnWorkers(Oid distributedRelationId, List *shardPlacements,
 		taskList = lappend(taskList, task);
 	}
 
-	ExecuteTaskList(CMD_UTILITY, taskList, DEFAULT_POOL_SIZE);
+	poolSize = InCoordinatedTransaction() ? DEFAULT_POOL_SIZE : 1;
+
+	ExecuteTaskList(CMD_UTILITY, taskList, poolSize);
 }
 
 
