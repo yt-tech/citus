@@ -2598,19 +2598,28 @@ InitializeCaches(void)
 
 	if (!performedInitialization)
 	{
-		/* set first, to avoid recursion dangers */
-		performedInitialization = true;
-
-		/* make sure we've initialized CacheMemoryContext */
-		if (CacheMemoryContext == NULL)
+		PG_TRY();
 		{
-			CreateCacheMemoryContext();
-		}
+			/* set first, to avoid recursion dangers */
+			performedInitialization = true;
 
-		InitializeDistTableCache();
-		RegisterForeignKeyGraphCacheCallbacks();
-		RegisterWorkerNodeCacheCallbacks();
-		RegisterLocalGroupIdCacheCallbacks();
+			/* make sure we've initialized CacheMemoryContext */
+			if (CacheMemoryContext == NULL)
+			{
+				CreateCacheMemoryContext();
+			}
+
+			InitializeDistTableCache();
+			RegisterForeignKeyGraphCacheCallbacks();
+			RegisterWorkerNodeCacheCallbacks();
+			RegisterLocalGroupIdCacheCallbacks();
+		}
+		PG_CATCH();
+		{
+			performedInitialization = false;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
 }
 
