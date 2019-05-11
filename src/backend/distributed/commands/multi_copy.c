@@ -2917,3 +2917,48 @@ CopyGetAttnums(TupleDesc tupDesc, Relation rel, List *attnamelist)
 	return attnums;
 	/* *INDENT-ON* */
 }
+
+
+void
+ExecuteCopyTask(MultiConnection *connection, CitusCopyDestReceiver *copyDest,
+				uint64 shardId, StringInfo copyData)
+{
+	StringInfo copyCommand = NULL;
+	PGresult *result = NULL;
+	CopyStmt *copyStatement = copyDest->copyStatement;
+	CopyOutState copyOutState = copyDest->copyOutState;
+
+	copyCommand = ConstructCopyStatement(copyStatement, shardId, copyOutState->binary);
+	if (!SendRemoteCommand(connection, copyCommand->data))
+	{
+		ReportConnectionError(connection, ERROR);
+	}
+
+	result = GetRemoteCommandResult(connection, raiseInterrupts);
+	if (PQresultStatus(result) != PGRES_COPY_IN)
+	{
+		ReportResultError(connection, result, ERROR);
+	}
+	PQclear(result);
+
+	if (copyOutState->binary)
+	{
+		SendCopyBinaryHeaders(copyOutState, shardId,
+							 list_make1(connection));
+	}
+
+	SendCopyDataToPlacement(copyData, shardId, connection);
+
+	if (copyOutState->binary)
+	{
+		SendCopyBinaryFooters(copyOutState, shardConnections->shardId,
+							  list_make1(connection));
+	}
+
+	if (!PutRemoteCopyEnd(connection, NULL))
+	{
+		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
+							errmsg("failed to COPY to shard " INT64_FORMAT " on %s:%d",
+								   shardId, connection->hostname, connection->port)));
+	}
+}
