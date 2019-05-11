@@ -2927,6 +2927,7 @@ ExecuteCopyTask(MultiConnection *connection, CitusCopyDestReceiver *copyDest,
 	PGresult *result = NULL;
 	CopyStmt *copyStatement = copyDest->copyStatement;
 	CopyOutState copyOutState = copyDest->copyOutState;
+	bool raiseInterrupts = true;
 
 	copyCommand = ConstructCopyStatement(copyStatement, shardId, copyOutState->binary);
 	if (!SendRemoteCommand(connection, copyCommand->data))
@@ -2943,16 +2944,14 @@ ExecuteCopyTask(MultiConnection *connection, CitusCopyDestReceiver *copyDest,
 
 	if (copyOutState->binary)
 	{
-		SendCopyBinaryHeaders(copyOutState, shardId,
-							 list_make1(connection));
+		SendCopyBinaryHeaders(copyOutState, shardId, list_make1(connection));
 	}
 
 	SendCopyDataToPlacement(copyData, shardId, connection);
 
 	if (copyOutState->binary)
 	{
-		SendCopyBinaryFooters(copyOutState, shardConnections->shardId,
-							  list_make1(connection));
+		SendCopyBinaryFooters(copyOutState, shardId, list_make1(connection));
 	}
 
 	if (!PutRemoteCopyEnd(connection, NULL))
