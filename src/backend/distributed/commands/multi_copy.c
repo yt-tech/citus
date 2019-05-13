@@ -97,6 +97,13 @@ static const char BinarySignature[11] = "PGCOPY\n\377\r\n\0";
 static MultiConnection *masterConnection = NULL;
 
 
+typedef struct ShardData
+{
+	int64 shardId;
+	StringInfo data;
+} ShardData;
+
+
 /* Local functions forward declarations */
 static void CopyFromWorkerNode(CopyStmt *copyStatement, char *completionTag);
 static void CopyToExistingShards(CopyStmt *copyStatement, char *completionTag);
@@ -145,6 +152,7 @@ static bool CopyStatementHasFormat(CopyStmt *copyStatement, char *formatName);
 static bool IsCopyFromWorker(CopyStmt *copyStatement);
 static NodeAddress * MasterNodeAddress(CopyStmt *copyStatement);
 static void CitusCopyFrom(CopyStmt *copyStatement, char *completionTag);
+static HTAB * CreateShardDataHash(MemoryContext memoryContext);
 
 /* Private functions copied and adapted from copy.c in PostgreSQL */
 static void CopySendData(CopyOutState outputState, const void *databuf, int datasize);
@@ -2960,4 +2968,23 @@ ExecuteCopyTask(MultiConnection *connection, CitusCopyDestReceiver *copyDest,
 							errmsg("failed to COPY to shard " INT64_FORMAT " on %s:%d",
 								   shardId, connection->hostname, connection->port)));
 	}
+}
+
+
+static HTAB *
+CreateShardDataHash(MemoryContext memoryContext)
+{
+	HTAB *shardDataHash = NULL;
+	int hashFlags = 0;
+	HASHCTL info;
+
+	memset(&info, 0, sizeof(info));
+	info.keysize = sizeof(int64);
+	info.entrysize = sizeof(ShardData);
+	info.hcxt = memoryContext;
+	hashFlags = (HASH_ELEM | HASH_CONTEXT | HASH_BLOBS);
+
+	shardDataHash = hash_create("Shard Data Hash", 128, &info, hashFlags);
+
+	return shardDataHash;
 }

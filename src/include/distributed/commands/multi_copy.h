@@ -97,6 +97,9 @@ typedef struct CitusCopyDestReceiver
 	HTAB *shardConnectionHash;
 	bool stopOnFailure;
 
+	/* cached data to be sent to shards */
+	HTAB *shardDataHash;
+
 	/* state on how to copy out data types */
 	CopyOutState copyOutState;
 	FmgrInfo *columnOutputFunctions;
