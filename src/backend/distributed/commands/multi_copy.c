@@ -153,6 +153,8 @@ static bool IsCopyFromWorker(CopyStmt *copyStatement);
 static NodeAddress * MasterNodeAddress(CopyStmt *copyStatement);
 static void CitusCopyFrom(CopyStmt *copyStatement, char *completionTag);
 static HTAB * CreateShardDataHash(MemoryContext memoryContext);
+static ShardData * GetShardData(HTAB *shardDataHash, int64 shardId, bool *dataFound);
+static List * ShardDataList(HTAB *shardDataHash);
 
 /* Private functions copied and adapted from copy.c in PostgreSQL */
 static void CopySendData(CopyOutState outputState, const void *databuf, int datasize);
@@ -2250,6 +2252,7 @@ CitusCopyDestReceiverStartup(DestReceiver *dest, int operation,
 	copyDest->copyStatement = copyStatement;
 
 	copyDest->shardConnectionHash = CreateShardConnectionHash(TopTransactionContext);
+	copyDest->shardDataHash = CreateShardDataHash(TopTransactionContext);
 }
 
 
@@ -2294,14 +2297,11 @@ CitusSendTupleToPlacements(TupleTableSlot *slot, CitusCopyDestReceiver *copyDest
 {
 	int partitionColumnIndex = copyDest->partitionColumnIndex;
 	TupleDesc tupleDescriptor = copyDest->tupleDescriptor;
-	CopyStmt *copyStatement = copyDest->copyStatement;
 
-	HTAB *shardConnectionHash = copyDest->shardConnectionHash;
+	HTAB *shardDataHash = copyDest->shardDataHash;
 	CopyOutState copyOutState = copyDest->copyOutState;
 	FmgrInfo *columnOutputFunctions = copyDest->columnOutputFunctions;
 	CopyCoercionData *columnCoercionPaths = copyDest->columnCoercionPaths;
-
-	bool stopOnFailure = copyDest->stopOnFailure;
 
 	Datum *columnValues = NULL;
 	bool *columnNulls = NULL;
@@ -2310,8 +2310,9 @@ CitusSendTupleToPlacements(TupleTableSlot *slot, CitusCopyDestReceiver *copyDest
 	ShardInterval *shardInterval = NULL;
 	int64 shardId = 0;
 
-	bool shardConnectionsFound = false;
-	ShardConnections *shardConnections = NULL;
+	bool shardDataFound = false;
+	ShardData *shardData = NULL;
+	StringInfo copyBuffer = NULL;
 
 	EState *executorState = copyDest->executorState;
 	MemoryContext executorTupleContext = GetPerTupleMemoryContext(executorState);
@@ -2374,46 +2375,14 @@ CitusSendTupleToPlacements(TupleTableSlot *slot, CitusCopyDestReceiver *copyDest
 	/* connections hash is kept in memory context */
 	MemoryContextSwitchTo(copyDest->memoryContext);
 
-	/* get existing connections to the shard placements, if any */
-	shardConnections = GetShardHashConnections(shardConnectionHash, shardId,
-											   &shardConnectionsFound);
-	if (!shardConnectionsFound)
-	{
-		/*
-		 * Keep track of multi shard accesses before opening connection
-		 * the second shard.
-		 */
-		if (!copyDest->multiShardCopy && hash_get_num_entries(shardConnectionHash) == 2)
-		{
-			Oid relationId = copyDest->distributedRelationId;
-
-			/* mark as multi shard to skip doing the same thing over and over */
-			copyDest->multiShardCopy = true;
-
-			/* error out of conflicting COPY */
-			CheckConflictingParallelCopyAccesses(relationId);
-
-			/* when we see multiple shard connections, we mark COPY as parallel modify */
-			RecordParallelModifyAccess(relationId);
-		}
-
-		/* open connections and initiate COPY on shard placements */
-		OpenCopyConnections(copyStatement, shardConnections, stopOnFailure,
-							copyOutState->binary);
-
-		/* send copy binary headers to shard placements */
-		if (copyOutState->binary)
-		{
-			SendCopyBinaryHeaders(copyOutState, shardId,
-								  shardConnections->connectionList);
-		}
-	}
+	shardData = GetShardData(shardDataHash, shardId, &shardDataFound);
 
 	/* replicate row to shard placements */
-	resetStringInfo(copyOutState->fe_msgbuf);
+	copyBuffer = copyOutState->fe_msgbuf;
+	resetStringInfo(copyBuffer);
 	AppendCopyRowData(columnValues, columnNulls, tupleDescriptor,
 					  copyOutState, columnOutputFunctions, columnCoercionPaths);
-	SendCopyDataToAll(copyOutState->fe_msgbuf, shardId, shardConnections->connectionList);
+	appendBinaryStringInfo(shardData->data, copyBuffer->data, copyBuffer->len);
 
 	MemoryContextSwitchTo(oldContext);
 
@@ -2441,44 +2410,19 @@ CitusCopyDestReceiverShutdown(DestReceiver *destReceiver)
 {
 	CitusCopyDestReceiver *copyDest = (CitusCopyDestReceiver *) destReceiver;
 
-	HTAB *shardConnectionHash = copyDest->shardConnectionHash;
-	List *shardConnectionsList = NIL;
-	ListCell *shardConnectionsCell = NULL;
+	HTAB *shardDataHash = copyDest->shardDataHash;
+	List *shardDataList = NIL;
+	ListCell *shardDataCell = NULL;
 	CopyOutState copyOutState = copyDest->copyOutState;
 	Relation distributedRelation = copyDest->distributedRelation;
 
-	shardConnectionsList = ShardConnectionList(shardConnectionHash);
+	shardDataList = ShardDataList(shardDataHash);
 
-	PG_TRY();
+	foreach(shardDataCell, shardDataList)
 	{
-		foreach(shardConnectionsCell, shardConnectionsList)
-		{
-			ShardConnections *shardConnections = (ShardConnections *) lfirst(
-				shardConnectionsCell);
-
-			/* send copy binary footers to all shard placements */
-			if (copyOutState->binary)
-			{
-				SendCopyBinaryFooters(copyOutState, shardConnections->shardId,
-									  shardConnections->connectionList);
-			}
-
-			/* close the COPY input on all shard placements */
-			EndRemoteCopy(shardConnections->shardId, shardConnections->connectionList,
-						  true);
-		}
+		ShardData *shardData = (ShardData *) lfirst(shardDataCell);
+		// TODO
 	}
-	PG_CATCH();
-	{
-		/*
-		 * We might be able to recover from errors with ROLLBACK TO SAVEPOINT,
-		 * so unclaim the connections before throwing errors.
-		 */
-		UnclaimAllShardConnections(shardConnectionHash);
-
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
 
 	heap_close(distributedRelation, NoLock);
 }
@@ -2987,4 +2931,45 @@ CreateShardDataHash(MemoryContext memoryContext)
 	shardDataHash = hash_create("Shard Data Hash", 128, &info, hashFlags);
 
 	return shardDataHash;
+}
+
+static ShardData *
+GetShardData(HTAB *shardDataHash, int64 shardId, bool *dataFound)
+{
+	ShardData *shardData = NULL;
+
+	shardData = (ShardData *) hash_search(shardDataHash, &shardId,
+										  HASH_ENTER, dataFound);
+	if (!*dataFound)
+	{
+		shardData->shardId = shardId;
+		shardData->data = makeStringInfo();
+	}
+
+	return shardData;
+}
+
+static List *
+ShardDataList(HTAB *shardDataHash)
+{
+	List *shardDataList = NIL;
+	HASH_SEQ_STATUS status;
+	ShardData *shardData = NULL;
+
+	if (shardDataHash == NULL)
+	{
+		return NIL;
+	}
+
+	hash_seq_init(&status, shardDataHash);
+
+	shardData = (ShardData *) hash_seq_search(&status);
+	while (shardData != NULL)
+	{
+		shardDataList = lappend(shardDataList, shardData);
+
+		shardData = (ShardData *) hash_seq_search(&status);
+	}
+
+	return shardDataList;
 }
