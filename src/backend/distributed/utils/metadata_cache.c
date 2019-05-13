@@ -60,6 +60,7 @@
 #include "utils/inval.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/palloc.h"
 #include "utils/rel.h"
 #include "utils/relfilenodemap.h"
@@ -190,7 +191,7 @@ static bool HasOverlappingShardInterval(ShardInterval **shardIntervalArray,
 										int shardIntervalArrayLength,
 										FmgrInfo *shardIntervalSortCompareFunction);
 static void InitializeCaches(void);
-static void InitializeDistTableCache(void);
+static void InitializeDistTableCache(MemoryContext shardCacheMemoryContext);
 static void InitializeWorkerNodeCache(void);
 static void RegisterForeignKeyGraphCacheCallbacks(void);
 static void RegisterWorkerNodeCacheCallbacks(void);
@@ -2598,6 +2599,8 @@ InitializeCaches(void)
 
 	if (!performedInitialization)
 	{
+		MemoryContext shardCacheMemoryContext = NULL;
+
 		PG_TRY();
 		{
 			/* set first, to avoid recursion dangers */
@@ -2609,7 +2612,12 @@ InitializeCaches(void)
 				CreateCacheMemoryContext();
 			}
 
-			InitializeDistTableCache();
+			shardCacheMemoryContext = AllocSetContextCreate(
+				CacheMemoryContext,
+				"ShardCacheMemoryContext",
+				ALLOCSET_DEFAULT_SIZES);
+
+			InitializeDistTableCache(shardCacheMemoryContext);
 			RegisterForeignKeyGraphCacheCallbacks();
 			RegisterWorkerNodeCacheCallbacks();
 			RegisterLocalGroupIdCacheCallbacks();
@@ -2617,6 +2625,11 @@ InitializeCaches(void)
 		PG_CATCH();
 		{
 			performedInitialization = false;
+			if (shardCacheMemoryContext != NULL)
+			{
+				MemoryContextDelete(shardCacheMemoryContext);
+			}
+
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -2626,7 +2639,7 @@ InitializeCaches(void)
 
 /* initialize the infrastructure for the metadata cache */
 static void
-InitializeDistTableCache(void)
+InitializeDistTableCache(MemoryContext shardCacheMemoryContext)
 {
 	HASHCTL info;
 
@@ -2635,7 +2648,7 @@ InitializeDistTableCache(void)
 
 	fmgr_info_cxt(F_OIDEQ,
 				  &DistPartitionScanKey[0].sk_func,
-				  CacheMemoryContext);
+				  shardCacheMemoryContext);
 	DistPartitionScanKey[0].sk_strategy = BTEqualStrategyNumber;
 	DistPartitionScanKey[0].sk_subtype = InvalidOid;
 	DistPartitionScanKey[0].sk_collation = InvalidOid;
@@ -2645,7 +2658,7 @@ InitializeDistTableCache(void)
 
 	fmgr_info_cxt(F_OIDEQ,
 				  &DistShardScanKey[0].sk_func,
-				  CacheMemoryContext);
+				  shardCacheMemoryContext);
 	DistShardScanKey[0].sk_strategy = BTEqualStrategyNumber;
 	DistShardScanKey[0].sk_subtype = InvalidOid;
 	DistShardScanKey[0].sk_collation = InvalidOid;
